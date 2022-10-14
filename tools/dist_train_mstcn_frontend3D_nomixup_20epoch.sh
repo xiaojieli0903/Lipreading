@@ -18,4 +18,4 @@ python -m torch.distributed.launch \
     --nproc_per_node=$GPUS \
     --master_port=$PORT \
     main.py --modality video --config-path $MODEL_JSON_PATH --annonation-direc $ANNONATION_DIRECTORY --data-dir $MOUTH_ROIS_DIRECTORY \
-    --model-path /userhome/train_logs/tcn/lrw_resnet18_mstcn/2022-10-13T05:34:07/ckpt.pth --init-epoch 1
+    --alpha 0 --epochs 20 --exp-name _nomixup_20epochs

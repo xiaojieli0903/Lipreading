@@ -18,3 +18,10 @@ python -m torch.distributed.launch \
     main.py --modality video --config-path $MODEL_JSON_PATH --annonation-direc $ANNONATION_DIRECTORY --data-dir $MOUTH_ROIS_DIRECTORY \
     --alpha 0 --epochs 20  --predict-loss-weight 1 --loss-average-dim 0 \
     --exp-name _nomixup_20epochs_lw1_avg0_detach --detach-target
+
+#CUDA_VISIBLE_DEVICES=3 python main.py --modality video \
+#                                      --config-path $MODEL_JSON_PATH \
+#                                      --annonation-direc $ANNONATION_DIRECTORY \
+#                                      --data-dir $MOUTH_ROIS_DIRECTORY \
+#				      --alpha 0 --epochs 20  --predict-loss-weight 1 --loss-average-dim 0 \
+#				      --exp-name _nomixup_20epochs_lw1_avg0_detach --detach-target

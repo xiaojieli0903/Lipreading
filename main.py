@@ -169,8 +169,8 @@ def load_args(default_config=None):
         default=False,
         action='store_true',
         help=
-        'If True, allows to init from model with mismatching weight tensors. Useful to init from model with diff. number of classes'
-    )
+        'If True, allows to init from model with mismatching weight tensors. Useful to init from model with different '
+        'number of classes')
     # -- feature extractor
     parser.add_argument('--extract-feats',
                         default=False,
@@ -226,7 +226,47 @@ def load_args(default_config=None):
                         type=int,
                         default=0,
                         help='the local rank.')
+    # predict loss weight
+    parser.add_argument('--predict-loss-weight',
+                        type=float,
+                        default=1.0,
+                        help='the weight of the predict loss.')
 
+    # cls loss weight
+    parser.add_argument('--cls-loss-weight',
+                        type=float,
+                        default=1.0,
+                        help='the weight of the cls loss.')
+    # loss average dim
+    parser.add_argument('--loss-average-dim',
+                        type=int,
+                        default=-1,
+                        help='the average dim of the L2 loss.')
+    # detach target
+    parser.add_argument('--detach-target',
+                        default=False,
+                        action='store_true',
+                        help='detach the target when calculate loss.')
+    # predict loss type
+    parser.add_argument('--predict-loss-type',
+                        type=str,
+                        default='l2',
+                        help='the type of the predict loss.')
+    # add memory loss
+    parser.add_argument('--add-memory-loss',
+                        default=False,
+                        action='store_true',
+                        help='whether add the memory loss from mvm.')
+    # memory target reconstruction loss weight
+    parser.add_argument('--recon-loss-weight',
+                        type=float,
+                        default=1.0,
+                        help='the weight of the recon loss.')
+    # memory slots difference loss weight
+    parser.add_argument('--contrastive-loss-weight',
+                        type=float,
+                        default=0.01,
+                        help='the weight of the contrastive loss.')
     args = parser.parse_args()
     return args
 
@@ -234,30 +274,54 @@ def load_args(default_config=None):
 args = load_args()
 
 
-def extract_feats(model):
+def extract_feats(model, path_list):
     """
     :rtype: FloatTensor
     """
     model.eval()
-    preprocessing_func = get_preprocessing_pipelines()['test']
-    data = preprocessing_func(np.load(
-        args.mouth_patch_path)['data'])  # data: TxHxW
-    return model(torch.FloatTensor(data)[None, None, :, :, :].cuda(),
-                 lengths=[data.shape[0]])
+    lines = open(path_list, 'r').readlines()
+    idx = 0
+    for line in lines:
+        if idx % 1000 == 0:
+            print(f"processing idx {idx}")
+        single_path = line.strip()
+        preprocessing_func = get_preprocessing_pipelines(args.modality)['test']
+        data = preprocessing_func(np.load(single_path)['data'])  # data: TxHxW
+        idx += 1
+        data_name = single_path.split('/')[-1]
+        out_path = os.path.join(args.mouth_embedding_out_path, data_name)
+        save2npz(
+            out_path,
+            model(torch.FloatTensor(data)[None, None, :, :, :].cuda(),
+                  lengths=[data.shape[0]]).cpu().detach().numpy())
 
 
-def l2_loss(pred, target):
-    """L2 loss.
+def calculate_loss(pred, target, loss_type='l2', average_dim=-1):
+    """calculate loss.
 
     Args:
-        pred (torch.Tensor): The prediction.
-        target (torch.Tensor): The learning target of the prediction.
-
+        pred (torch.Tensor): The predict.
+        target (torch.Tensor): The learning target of the predict.
+        loss_type (str): The type of the  loss
+        average_dim (int): The average dim of loss.
     Returns:
         torch.Tensor: Calculated loss
     """
     assert pred.size() == target.size() and target.numel() > 0
-    loss = torch.sum(torch.pow(pred - target, 2)) / target.numel()
+    if loss_type == 'l2':
+        if average_dim == -1:
+            loss = torch.sum(torch.pow(pred - target, 2))
+        else:
+            loss = torch.sum(torch.pow(pred - target,
+                                       2)) / target.shape[average_dim]
+    elif loss_type == 'cosine':
+        loss = torch.abs(1 - F.cosine_similarity(pred, target, 1)).sum()
+    else:
+        raise RuntimeError(f'Loss type {loss_type} is not supported.')
+    if average_dim == -1:
+        loss /= target.numel()
+    else:
+        loss /= target.shape[average_dim]
     return loss
 
 
@@ -277,7 +341,7 @@ def evaluate(model, dset_loader, criterion):
                 input, lengths, labels = data
                 boundaries = None
             if model.module.predict_future >= 0:
-                logits, future_predict, future_target = model(
+                logits, feature_predict, feature_target, _, _= model(
                     input.unsqueeze(1).cuda(),
                     lengths=lengths,
                     boundaries=boundaries)
@@ -317,6 +381,7 @@ def train(model, dset_loader, criterion, epoch, optimizer, logger):
     running_corrects = 0.
     running_all = 0.
     loss_dict = {}
+    loss_weight = {}
 
     end = time.time()
     for batch_idx, data in enumerate(dset_loader):
@@ -338,14 +403,31 @@ def train(model, dset_loader, criterion, epoch, optimizer, logger):
         optimizer.zero_grad()
         loss = torch.zeros(1).float().cuda()
         if model.module.predict_future >= 0:
-            logits, future_predict, future_target = model(
+            logits, feature_predict, feature_target, target_recon_loss, contrastive_loss = model(
                 input.unsqueeze(1).cuda(),
                 lengths=lengths,
                 boundaries=boundaries,
                 targets=labels_a)
-            loss_predict = l2_loss(future_predict, future_target)
-            loss_dict['loss_L2'] = loss_predict
-            loss += loss_predict
+            if args.detach_target:
+                loss_predict = calculate_loss(feature_predict,
+                                              feature_target.detach(),
+                                              args.predict_loss_type,
+                                              args.loss_average_dim)
+            else:
+                loss_predict = calculate_loss(feature_predict, feature_target,
+                                              args.predict_loss_type,
+                                              args.loss_average_dim)
+            predict_loss_name = 'loss_' + args.predict_loss_type
+            loss_dict[predict_loss_name] = loss_predict
+            loss_weight[predict_loss_name] = args.predict_loss_weight
+            loss += args.predict_loss_weight * loss_predict
+            if args.add_memory_loss and target_recon_loss is not None:
+                loss += args.recon_loss_weight * target_recon_loss
+                loss += args.contrastive_loss_weight * contrastive_loss
+                loss_dict['loss_target_recon'] = target_recon_loss
+                loss_weight['loss_target_recon'] = args.recon_loss_weight
+                loss_dict['loss_contrastive'] = contrastive_loss
+                loss_weight['loss_contrastive'] = args.contrastive_loss_weight
         else:
             logits = model(input.unsqueeze(1).cuda(),
                            lengths=lengths,
@@ -355,7 +437,8 @@ def train(model, dset_loader, criterion, epoch, optimizer, logger):
         loss_func = mixup_criterion(labels_a, labels_b, lam)
         loss_KL = loss_func(criterion, logits)
         loss_dict['loss_KL'] = loss_KL
-        loss += loss_KL
+        loss_weight['loss_KL'] = args.cls_loss_weight
+        loss += args.cls_loss_weight * loss_KL
 
         loss.backward()
         optimizer.step()
@@ -376,9 +459,10 @@ def train(model, dset_loader, criterion, epoch, optimizer, logger):
             (batch_idx == len(dset_loader) - 1)) and args.rank == 0:
             update_logger_batch(
                 args, logger, dset_loader, batch_idx, running_loss, loss_dict,
-                running_corrects, running_all, batch_time, data_time, lr,
+                loss_weight, running_corrects, running_all, batch_time, data_time, lr,
                 torch.cuda.max_memory_allocated() / 1024 / 1024, global_iter,
                 dataset_num)
+
     return model
 
 
@@ -398,6 +482,13 @@ def get_model_from_json():
     args.membanks_size = args_loaded.get("membanks_size", 1024)
     args.predict_residual = args_loaded.get("predict_residual", False)
     args.predict_type = args_loaded.get("predict_type", 0)
+    args.block_size = args_loaded.get("block_size", 4)
+    args.memory_type = args_loaded.get('memory_type', 'memdpc')
+    args.memory_options = args_loaded.get("memory_options", {
+        'radius': 16,
+        'slot': 112,
+        'head': 8
+    })
 
     if args_loaded.get('tcn_num_layers', ''):
         tcn_options = {
@@ -437,7 +528,10 @@ def get_model_from_json():
                        use_memory=args.use_memory,
                        membanks_size=args.membanks_size,
                        predict_residual=args.predict_residual,
-                       predict_type=args.predict_type).cuda()
+                       predict_type=args.predict_type,
+                       block_size=args.block_size,
+                       memory_type=args.memory_type,
+                       memory_options=args.memory_options).cuda()
     calculateNorm2(model)
     return model
 
@@ -504,29 +598,31 @@ def main():
             model, optimizer, epoch_idx, ckpt_dict = load_model(
                 args.model_path, model, optimizer)
             args.init_epoch = epoch_idx
-            ckpt_saver.set_best_from_ckpt(ckpt_dict)
-            logger.info(
-                f'Model and states have been successfully loaded from {args.model_path}'
-            )
+            if args.rank == 0:
+                ckpt_saver.set_best_from_ckpt(ckpt_dict)
+                logger.info(
+                    f'Model and states have been successfully loaded from {args.model_path}'
+                )
         # init from trained model
         else:
             model = load_model(args.model_path,
                                model,
                                allow_size_mismatch=args.allow_size_mismatch)
-            logger.info(
-                f'Model has been successfully loaded from {args.model_path}')
+            if args.rank == 0:
+                logger.info(
+                    f'Model has been successfully loaded from {args.model_path}')
         # feature extraction
         if args.mouth_patch_path:
-            save2npz(args.mouth_embedding_out_path,
-                     data=extract_feats(model).cpu().detach().numpy())
+            extract_feats(model, args.mouth_patch_path)
             return
         # if test-time, performance on test partition and exit. Otherwise, performance on validation and continue (sanity check for reload)
         if args.test:
             acc_avg_test, loss_avg_test = evaluate(model, dset_loaders['test'],
                                                    criterion)
-            logger.info(
-                f"Test-time performance on partition {'test'}: Loss: {loss_avg_test:.4f}\tAcc:{acc_avg_test:.4f}"
-            )
+            if args.rank == 0:
+                logger.info(
+                    f"Test-time performance on partition {'test'}: Loss: {loss_avg_test:.4f}\tAcc:{acc_avg_test:.4f}"
+                )
             return
 
     # -- fix learning rate after loading the ckeckpoint (latency)

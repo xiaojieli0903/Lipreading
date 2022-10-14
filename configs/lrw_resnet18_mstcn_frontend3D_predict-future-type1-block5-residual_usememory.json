@@ -1,0 +1,20 @@
+{
+    "backbone_type": "resnet",
+    "frontend_type": "3D",
+    "relu_type": "swish",
+    "tcn_dropout": 0.2,
+    "tcn_dwpw": false,
+    "tcn_kernel_size": [
+        3,
+        5,
+        7
+    ],
+    "tcn_num_layers": 4,
+    "tcn_width_mult": 1,
+    "width_mult": 1.0,
+    "predict_future": 1,
+    "use_memory": true,
+    "predict_type": 1,
+    "block_size": 5,
+    "predict_residual": true
+}

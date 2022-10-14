@@ -207,8 +207,8 @@ def get_logger(args, save_path):
 
 
 def update_logger_batch(args, logger, dset_loader, batch_idx, running_loss,
-                        loss_dict, running_corrects, running_all, batch_time,
-                        data_time, lr, mem, global_iter, dataset_num):
+                        loss_dict, loss_weight, running_corrects, running_all,
+                        batch_time, data_time, lr, mem, global_iter, dataset_num):
     perc_epoch = 100. * batch_idx / (len(dset_loader) - 1)
     all_iters = args.epochs * len(dset_loader)
     eta = batch_time.avg * (all_iters - global_iter) / 3600
@@ -224,7 +224,9 @@ def update_logger_batch(args, logger, dset_loader, batch_idx, running_loss,
         f"Instances per second: {args.batch_size*args.world_size/batch_time.avg:.2f} | ETA: {eta:.2f}h"
     )
     for key in loss_dict:
-        logger.info(f"-----{key}: {loss_dict[key].item():.4f}")
+        logger.info(
+            f"-----{key}: {loss_weight[key]:.4f} * {loss_dict[key].item():.4f}"
+        )
 
 
 def get_save_folder(args):

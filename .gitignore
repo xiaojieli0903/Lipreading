@@ -11,3 +11,4 @@ datasets/outputs
 */.ipynb*
 */*/.ipynb*
 .ipynb*/*
+train_logs/
